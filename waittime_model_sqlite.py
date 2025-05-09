@@ -119,6 +119,9 @@ def compute_metrics(txdf, delta):
     txdf['mined_dt'] = pd.to_datetime(txdf['mined_at'], unit='s', origin='unix')
     txdf['waittime'] = (txdf['mined_dt'] - txdf['found_dt']).dt.total_seconds() / 60.0
     
+    # Lets clean up any outlier waittimes cols
+    txdf = txdf[txdf['waittime'] < 1000]
+    
     # Print average waittime
     print(f"Average waittime Seconds: {txdf['waittime'].mean()}")
 
