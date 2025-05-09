@@ -3,6 +3,11 @@ import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
 import matplotlib.pyplot as plt
+import matplotlib
+from sklearn.model_selection import train_test_split
+
+matplotlib.use('TkAgg')
+
 
 DB_PATH_DEFAULT = 'full.db'
 Q_MAX = 10  # maximum inverse-respend bin
@@ -113,6 +118,9 @@ def compute_metrics(txdf, delta):
     txdf['found_dt'] = pd.to_datetime(txdf['found_at'], unit='s', origin='unix')
     txdf['mined_dt'] = pd.to_datetime(txdf['mined_at'], unit='s', origin='unix')
     txdf['waittime'] = (txdf['mined_dt'] - txdf['found_dt']).dt.total_seconds() / 60.0
+    
+    # Print average waittime
+    print(f"Average waittime Seconds: {txdf['waittime'].mean()}")
 
     # CPFP: find the earliest child transaction per parent
     parent = txdf[['tx_id','mined_at']].rename(
@@ -186,15 +194,22 @@ def run_regression(txdf, zoom=None):
     """
     X = txdf[['congestion','F','rbf_flag','cpfp_flag']]
     y = txdf['waittime']
-    model = LinearRegression().fit(X, y)
-    r2    = model.score(X, y)
+    
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+    
+    model = LinearRegression().fit(X_train, y_train)
+    train_r2 = model.score(X_train, y_train)
+    test_r2 = model.score(X_test, y_test)
 
     # print coefficients
     print("\nRegression results:")
     print(f"  Intercept: {model.intercept_:.4f}")
     for feat, coef in zip(X.columns, model.coef_):
         print(f"Beta_{feat}: {coef:.4f}")
-    print(f"R² = {r2:.4f}\n")
+    print(f"Train R² = {train_r2:.4f}")
+    print(f"Test R² = {test_r2:.4f}")
 
     # scatter plot observed vs. predicted
     yhat = model.predict(X)
@@ -202,7 +217,7 @@ def run_regression(txdf, zoom=None):
     plt.scatter(y, yhat, alpha=0.3)
     plt.xlabel('Observed wait-time (mins)')
     plt.ylabel('Predicted wait-time (mins)')
-    plt.title(f'Wait-time Model (R²={r2:.2f})')
+    plt.title(f'Wait-time Model (Train R²={train_r2:.2f}, Test R²={test_r2:.2f})')
     plt.grid(True)
     if zoom is not None:
         plt.xlim(0, zoom)
