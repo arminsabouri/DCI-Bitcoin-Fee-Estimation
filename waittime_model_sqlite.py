@@ -3,12 +3,6 @@ import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
 import matplotlib.pyplot as plt
-import matplotlib
-from sklearn.model_selection import train_test_split
-
-matplotlib.use('TkAgg')
-pd.set_option('display.max_colwidth', 50)
-
 
 DB_PATH_DEFAULT = 'full.db'
 Q_MAX = 10  # maximum inverse-respend bin
@@ -64,21 +58,10 @@ def load_data(db_path, tx_dump, rbf_dump):
               mined_at,
               child_txid
             FROM transactions
-            WHERE mined_at IS NOT NULL AND pruned_at IS NULL AND found_at != mined_at
+            WHERE mined_at IS NOT NULL
         """, conn)
         # load the list of RBF-marked inputs
         rbfd = pd.read_sql_query("SELECT inputs_hash FROM rbf;", conn)
-        
-        mempool_df = pd.read_sql_query("""
-            SELECT
-                tx_id,
-                created_at,
-                size,
-                tx_count,
-                block_height,
-                block_hash
-            FROM mempool
-        """, conn)
         conn.close()
         print(f"Direct load: {len(txdf)} tx & {len(rbfd)} rbf rows from {db_path}")
     except Exception as e:
@@ -109,35 +92,27 @@ def load_data(db_path, tx_dump, rbf_dump):
     txdf = txdf.merge(rbfd[['inputs_hash','rbf_flag']],
                       on='inputs_hash', how='left')
     txdf['rbf_flag'] = txdf['rbf_flag'].fillna(0).astype(int)
-    
-    return txdf, mempool_df
+    return txdf
 
-def compute_metrics(txdf, mempool_df, delta):
-    # treat found_at == 0 as instant (set equal to mined_at)
-    # txdf['found_at'] = txdf['found_at'].mask(
-    #     txdf['found_at'] == 0,
-    #     txdf['mined_at']
-    # )
-    # Remove rows where found_at is 0
-    # txdf = txdf[txdf['found_at'] != 0]
+def compute_metrics(txdf, delta):
+    """
+    Compute various per-transaction metrics:
+      1) Treat found_at == 0 (unseen in mempool) as instant confirmation.
+      2) Calculate actual wait-time in minutes between found_at and mined_at.
+      3) Identify first-child-pays-for-parent (CPFP) transactions.
+      4) Compute re-spend lag and its inverse.
+      5) Bin the inverse respend into discrete quantile bins 1..Q_MAX.
+    """
+    # Instant confirmation when no mempool timestamp, do not know if this is actually right
+    txdf['found_at'] = txdf['found_at'].mask(
+        txdf['found_at'] == 0,
+        txdf['mined_at']
+    )
 
-    # compute actual wait-time in minutes
-    # txdf['found_at'] = pd.to_datetime(txdf['found_at'], unit='s', origin='unix')
-    # txdf['mined_at'] = pd.to_datetime(txdf['mined_at'], unit='s', origin='unix')
-    
-    # Compute mempool createat as datetime
-    # mempool_df['created_at'] = pd.to_datetime(mempool_df['created_at'], unit='s', origin='unix')
-    
-    txdf['waittime'] = (txdf['mined_at'] - txdf['found_at'])
-    
-    # Remove waittime outliers
-    txdf = txdf[txdf['waittime'] < 1000]
-    
-    # Print average waittime
-    print(f"Average waittime Seconds: {txdf['waittime'].mean()}")
-    
-    # total number of txs
-    print(f"Total number of txs: {len(txdf)}")
+    # convert Unix seconds to datetime, then compute wait-time (minutes)
+    txdf['found_dt'] = pd.to_datetime(txdf['found_at'], unit='s', origin='unix')
+    txdf['mined_dt'] = pd.to_datetime(txdf['mined_at'], unit='s', origin='unix')
+    txdf['waittime'] = (txdf['mined_dt'] - txdf['found_dt']).dt.total_seconds() / 60.0
 
     # CPFP: find the earliest child transaction per parent
     parent = txdf[['tx_id','mined_at']].rename(
@@ -163,31 +138,13 @@ def compute_metrics(txdf, mempool_df, delta):
         txdf['first_child_mined'] - txdf['mined_at'],
         max_mined - txdf['mined_at']
     )
-    txdf['respend_time'] = txdf['respend_time'].replace(0, np.nan)
-    # txdf['inverse_respend'] = 1.0 / txdf['respend_time']
+    # avoid division by zero
+    txdf['inverse_respend'] = 1.0 / txdf['respend_time'].replace(0, np.nan)
 
-    # bin the inverse_respend into 1..Q_MAX
-    # raw_q = np.ceil(txdf['respend_time'] / delta).fillna(0)
-    # txdf['bin'] = raw_q.clip(lower=1, upper=Q_MAX).astype(int)
-    
-    # Add mempool size to txdf where mined_at is within 60 seconds 
-    # txdf['mempool_size'] = mempool_df['size'].loc[txdf['mined_at'].isin(mempool_df['created_at'])]
-    # Create a time window for each mempool timestamp
-    mempool_df['window_start'] = mempool_df['created_at'] - 60
-    mempool_df['window_end'] = mempool_df['created_at'] + 60
+    # quantile-bin the inverse respend values into [1..Q_MAX]
+    raw_q = np.ceil(txdf['inverse_respend'] / delta).fillna(0)
+    txdf['bin'] = raw_q.clip(lower=1, upper=Q_MAX).astype(int)
 
-    # For each transaction, find matching mempool window and get size
-    def get_mempool_size(mined_at):
-        matching = mempool_df[
-            (mempool_df['window_start'] <= mined_at) & 
-            (mempool_df['window_end'] >= mined_at)
-        ]
-        return matching['size'].iloc[0] if not matching.empty else None
-
-    txdf['mempool_size'] = txdf['mined_at'].apply(get_mempool_size)
-    print(f"Average mempool size: {txdf['mempool_size'].mean()}")
-    
-    print(txdf['mempool_size'].head())
     return txdf
 
 def compute_epoch_stats(txdf, bins):
@@ -222,61 +179,30 @@ def compute_epoch_stats(txdf, bins):
     return txdf
 
 def run_regression(txdf, zoom=None):
-    # Print all the first 5 rows of txdf with no truncation
-    for index, row in txdf.tail().iterrows():
-        print(row)
-        
-        
-    # Plot mempool size histogram
-    plt.figure(figsize=(10, 6))
-    plt.hist(txdf['mempool_size'], bins=100, edgecolor='black')
-    plt.xlabel('Mempool Size')
-    plt.ylabel('Frequency')
-    plt.title('Mempool Size Distribution')
-    plt.show()
-    
-    # Plot waittime histogram
-    plt.figure(figsize=(10, 6))
-    plt.hist(txdf['waittime'], bins=100, edgecolor='black')
-    plt.xlabel('Wait Time (seconds)')
-    plt.ylabel('Frequency')
-    plt.title('Wait Time Distribution')
-    plt.show()
-        
-    # Plot mempool size vs waittime
-    plt.figure(figsize=(10, 6))
-    plt.scatter(txdf['mempool_size'], txdf['waittime'], alpha=0.3)
-    plt.xlabel('Mempool Size')
-    plt.ylabel('Wait Time (seconds)')
-    plt.title('Mempool Size vs Wait Time')
-    plt.show()
-    
-    X = txdf[['mempool_size']]
+    """
+    Fit a simple linear regression of waittime on:
+      [ congestion, F, rbf_flag, cpfp_flag ]
+    Then plot observed vs. predicted wait-times.
+    """
+    X = txdf[['congestion','F','rbf_flag','cpfp_flag']]
     y = txdf['waittime']
-    
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
-    
-    model = LinearRegression().fit(X_train, y_train)
-    train_r2 = model.score(X_train, y_train)
-    test_r2 = model.score(X_test, y_test)
+    model = LinearRegression().fit(X, y)
+    r2    = model.score(X, y)
 
     # print coefficients
     print("\nRegression results:")
     print(f"  Intercept: {model.intercept_:.4f}")
     for feat, coef in zip(X.columns, model.coef_):
         print(f"Beta_{feat}: {coef:.4f}")
-    print(f"Train R² = {train_r2:.4f}")
-    print(f"Test R² = {test_r2:.4f}")
+    print(f"R² = {r2:.4f}\n")
 
     # scatter plot observed vs. predicted
     yhat = model.predict(X)
     plt.figure(figsize=(6,6))
     plt.scatter(y, yhat, alpha=0.3)
-    plt.xlabel('Observed wait-time (seconds)')
-    plt.ylabel('Predicted wait-time (seconds)')
-    plt.title(f'Wait-time Model (Train R²={train_r2:.2f}, Test R²={test_r2:.2f})')
+    plt.xlabel('Observed wait-time (mins)')
+    plt.ylabel('Predicted wait-time (mins)')
+    plt.title(f'Wait-time Model (R²={r2:.2f})')
     plt.grid(True)
     if zoom is not None:
         plt.xlim(0, zoom)
@@ -295,9 +221,13 @@ def main():
     args = p.parse_args()
 
     print(f"RUNNING: {sys.argv[0]}")
-    txdf, mempool_df = load_data(args.db_path, args.tx_dump, args.rbf_dump)
-    txdf = compute_metrics(txdf, mempool_df, delta=args.delta)
-    # txdf = compute_epoch_stats(txdf, bins=args.bins)
+    # load data (possibly from dumps)
+    txdf = load_data(args.db_path, args.tx_dump, args.rbf_dump)
+    # compute per-tx metrics
+    txdf = compute_metrics(txdf, delta=args.delta)
+    # compute per-epoch/bin aggregates
+    txdf = compute_epoch_stats(txdf, bins=args.bins)
+    # fit model and plot
     run_regression(txdf, zoom=args.zoom)
 
 if __name__=='__main__':
