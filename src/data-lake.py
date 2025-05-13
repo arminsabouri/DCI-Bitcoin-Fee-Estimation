@@ -71,6 +71,9 @@ def compute_metrics(transactions, mempool, rbf):
         return matching['tx_count'].iloc[0] if not matching.empty else None
         
     transactions['mempool_tx_count'] = transactions['found_at'].apply(get_mempool_tx_count)
+    
+    # We can drop tx_data. We should extract any deata we can from it and then drop it.
+    transactions = transactions.drop(columns=['tx_data'])
     return transactions
     
 def output_data(transactions):
