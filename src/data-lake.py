@@ -46,6 +46,7 @@ def remove_outliers_iqr(df, column):
     upper = Q3 + 3 * IQR
     return df[(df[column] >= lower) & (df[column] <= upper)]
 
+
 def compute_metrics(transactions):
     print(f"total transactions length: {len(transactions)}")
     # Ensure there are no null values or 0 values for found_at or mined_at
@@ -59,7 +60,7 @@ def compute_metrics(transactions):
     print(f"transactions after removing outliers: {len(transactions)}")
 
     # We can drop tx_data. We should extract any deata we can from it and then drop it.
-    # TODO Need to extract weight and size from tx_data before dropping it 
+    # TODO Need to extract weight and size from tx_data before dropping it
     transactions = transactions.drop(columns=['tx_data'])
     return transactions
 
