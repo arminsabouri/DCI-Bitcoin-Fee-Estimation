@@ -8,6 +8,8 @@ import pandas as pd
 import sqlite3
 import argparse
 import pickle
+from bitcoin.core import CTransaction
+from io import BytesIO
 
 
 def connect_to_db(db_path):
@@ -20,7 +22,7 @@ def load_data(conn):
     transactions = pd.read_sql_query("""
         SELECT 
             transactions.*,
-            (transactions.mined_at - transactions.found_at) AS wait_time,
+            (transactions.mined_at - transactions.found_at) AS waittime,
             MAX(rbf.fee_total) AS rbf_fee_total,
             AVG(mempool.size) AS mempool_size,
             AVG(mempool.tx_count) AS mempool_tx_count
@@ -32,7 +34,7 @@ def load_data(conn):
           AND transactions.found_at IS NOT NULL
         GROUP BY transactions.tx_id
         ORDER BY transactions.found_at DESC
-        LIMIT 100
+        LIMIT 10000
     """, conn)
 
     return transactions
@@ -47,6 +49,13 @@ def remove_outliers_iqr(df, column):
     return df[(df[column] >= lower) & (df[column] <= upper)]
 
 
+def get_tx_weight(tx_hex: str) -> int:
+    tx_bytes = bytes.fromhex(tx_hex)
+    stream = BytesIO(tx_bytes)
+    tx = CTransaction.stream_deserialize(stream)
+    return tx.calc_weight()
+
+
 def compute_metrics(transactions):
     print(f"total transactions length: {len(transactions)}")
     # Ensure there are no null values or 0 values for found_at or mined_at
@@ -56,11 +65,16 @@ def compute_metrics(transactions):
                         0].shape[0] == transactions.shape[0], "mined_at has null values"
 
     # Remove outliers from waittime
-    transactions = remove_outliers_iqr(transactions, 'wait_time')
+    transactions = remove_outliers_iqr(transactions, 'waittime')
     print(f"transactions after removing outliers: {len(transactions)}")
 
-    # We can drop tx_data. We should extract any deata we can from it and then drop it.
-    # TODO Need to extract weight and size from tx_data before dropping it
+    tx_bytes = bytes.fromhex(transactions['tx_data'].iloc[0])
+    stream = BytesIO(tx_bytes)
+    tx = CTransaction.stream_deserialize(stream)
+    transactions['weight'] = tx.calc_weight()
+    transactions['size'] = len(tx_bytes)
+
+    # We can drop tx_data. We should extract any data we can from it and then drop it.
     transactions = transactions.drop(columns=['tx_data'])
     return transactions
 
