@@ -68,11 +68,15 @@ def compute_metrics(transactions):
     transactions = remove_outliers_iqr(transactions, 'waittime')
     print(f"transactions after removing outliers: {len(transactions)}")
 
-    tx_bytes = bytes.fromhex(transactions['tx_data'].iloc[0])
-    stream = BytesIO(tx_bytes)
-    tx = CTransaction.stream_deserialize(stream)
-    transactions['weight'] = tx.calc_weight()
-    transactions['size'] = len(tx_bytes)
+    def get_weight_and_size(tx_hex):
+        tx_bytes = bytes.fromhex(tx_hex)
+        stream = BytesIO(tx_bytes)
+        tx = CTransaction.stream_deserialize(stream)
+        return tx.calc_weight(), len(tx_bytes)
+
+    transactions[['weight', 'size']] = transactions['tx_data'].apply(
+        lambda tx_hex: pd.Series(get_weight_and_size(tx_hex))
+    )
 
     # We can drop tx_data. We should extract any data we can from it and then drop it.
     transactions = transactions.drop(columns=['tx_data'])
