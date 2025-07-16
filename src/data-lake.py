@@ -18,26 +18,42 @@ def connect_to_db(db_path):
 
 
 def load_data(conn):
-    # Load transactions table
+    # Get base transactions first
     transactions = pd.read_sql_query("""
         SELECT 
             transactions.*,
-            (transactions.mined_at - transactions.found_at) AS waittime,
-            MAX(rbf.fee_total) AS rbf_fee_total,
-            AVG(mempool.size) AS mempool_size,
-            AVG(mempool.tx_count) AS mempool_tx_count
+            (mined_at - found_at) AS waittime
         FROM transactions
-        JOIN rbf ON transactions.inputs_hash = rbf.inputs_hash
-        LEFT JOIN mempool 
-            ON transactions.found_at BETWEEN mempool.created_at - 3600 AND mempool.created_at + 3600
-        WHERE transactions.mined_at IS NOT NULL 
-          AND transactions.found_at IS NOT NULL
-        GROUP BY transactions.tx_id
-        ORDER BY transactions.found_at DESC
-        LIMIT 10000
+        WHERE mined_at IS NOT NULL AND found_at IS NOT NULL
+        ORDER BY found_at DESC
     """, conn)
-
-    return transactions
+    
+    # Get RBF data separately
+    rbf_data = pd.read_sql_query("""
+        SELECT inputs_hash, MAX(fee_total) as rbf_fee_total
+        FROM rbf
+        GROUP BY inputs_hash
+    """, conn)
+    
+    # Get mempool data separately (pre-aggregate by hour)
+    mempool_data = pd.read_sql_query("""
+        SELECT 
+            strftime('%Y-%m-%d %H:00:00', datetime(created_at, 'unixepoch')) as hour,
+            AVG(size) as mempool_size,
+            AVG(tx_count) as mempool_tx_count
+        FROM mempool
+        GROUP BY hour
+    """, conn)
+    
+    # Merge in Python (much faster than SQL JOINs)
+    transactions = transactions.merge(rbf_data, on='inputs_hash', how='left')
+    
+    # Add hour column for mempool matching
+    transactions['hour'] = pd.to_datetime(transactions['found_at'], unit='s').dt.floor('H')
+    mempool_data['hour'] = pd.to_datetime(mempool_data['hour'])
+    transactions = transactions.merge(mempool_data, on='hour', how='left')
+    
+    return transactions.drop('hour', axis=1)
 
 
 def remove_outliers_iqr(df, column):
