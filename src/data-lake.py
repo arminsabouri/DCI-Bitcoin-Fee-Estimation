@@ -10,6 +10,14 @@ import argparse
 import pickle
 from bitcoin.core import CTransaction
 from io import BytesIO
+from bitcoinrpc import BitcoinRPC
+import asyncio
+
+
+def connect_to_rpc(rpc_user, rpc_password, rpc_host, rpc_port):
+    host = f"http://{rpc_host}:{rpc_port}"
+    rpc = BitcoinRPC.from_config(host, (rpc_user, rpc_password))
+    return rpc
 
 
 def connect_to_db(db_path):
@@ -27,14 +35,14 @@ def load_data(conn):
         WHERE mined_at IS NOT NULL AND found_at IS NOT NULL
         ORDER BY found_at DESC
     """, conn)
-    
+
     # Get RBF data separately
     rbf_data = pd.read_sql_query("""
         SELECT inputs_hash, MAX(fee_total) as rbf_fee_total
         FROM rbf
         GROUP BY inputs_hash
     """, conn)
-    
+
     # Get mempool data separately (pre-aggregate by hour)
     mempool_data = pd.read_sql_query("""
         SELECT 
@@ -44,15 +52,16 @@ def load_data(conn):
         FROM mempool
         GROUP BY hour
     """, conn)
-    
+
     # Merge in Python (much faster than SQL JOINs)
     transactions = transactions.merge(rbf_data, on='inputs_hash', how='left')
-    
+
     # Add hour column for mempool matching
-    transactions['hour'] = pd.to_datetime(transactions['found_at'], unit='s').dt.floor('H')
+    transactions['hour'] = pd.to_datetime(
+        transactions['found_at'], unit='s').dt.floor('H')
     mempool_data['hour'] = pd.to_datetime(mempool_data['hour'])
     transactions = transactions.merge(mempool_data, on='hour', how='left')
-    
+
     return transactions.drop('hour', axis=1)
 
 
@@ -72,7 +81,7 @@ def get_tx_weight(tx_hex: str) -> int:
     return tx.calc_weight()
 
 
-def compute_metrics(transactions):
+async def compute_metrics(transactions, rpc: BitcoinRPC):
     print(f"total transactions length: {len(transactions)}")
     # Ensure there are no null values or 0 values for found_at or mined_at
     assert transactions[transactions['found_at'] >
@@ -84,15 +93,39 @@ def compute_metrics(transactions):
     transactions = remove_outliers_iqr(transactions, 'waittime')
     print(f"transactions after removing outliers: {len(transactions)}")
 
-    def get_weight_and_size(tx_hex):
+    def ser_tx(tx_hex: str) -> CTransaction:
         tx_bytes = bytes.fromhex(tx_hex)
         stream = BytesIO(tx_bytes)
         tx = CTransaction.stream_deserialize(stream)
+        return tx
+
+    def get_weight_and_size(tx_hex: str):
+        tx_bytes = bytes.fromhex(tx_hex)
+        tx = ser_tx(tx_hex)
         return tx.calc_weight(), len(tx_bytes)
+
+    async def get_min_respend_time(tx_hex: str):
+        tx = ser_tx(tx_hex)
+        confs = []
+        for vin in tx.vin:
+            txid = str(vin.prevout).split(':')[0]
+            try:
+                prev_tx = await rpc.getrawtransaction(txid, True)
+                confs.append(prev_tx['confirmations'])
+            except Exception as e:
+                print(f"Error: {e}")
+        if len(confs) == 0:
+            return 0
+        return min(confs)
 
     transactions[['weight', 'size']] = transactions['tx_data'].apply(
         lambda tx_hex: pd.Series(get_weight_and_size(tx_hex))
     )
+    # Compute min_respend_time for each transaction asynchronously
+    min_respend_times = await asyncio.gather(
+        *[get_min_respend_time(tx_hex) for tx_hex in transactions['tx_data']]
+    )
+    transactions['min_respend_time'] = min_respend_times
 
     # We can drop tx_data. We should extract any data we can from it and then drop it.
     transactions = transactions.drop(columns=['tx_data'])
@@ -104,15 +137,21 @@ def output_data(transactions):
         pickle.dump(transactions, f)
 
 
-def main():
+async def main():
     p = argparse.ArgumentParser()
     p.add_argument('--db-path', required=True)
+    p.add_argument('--rpc-user', required=True)
+    p.add_argument('--rpc-password', required=True)
+    p.add_argument('--rpc-host', required=True)
+    p.add_argument('--rpc-port', required=True)
     args = p.parse_args()
 
     conn = connect_to_db(args.db_path)
+    rpc = connect_to_rpc(args.rpc_user, args.rpc_password,
+                         args.rpc_host, args.rpc_port)
     try:
         transactions = load_data(conn)
-        transactions = compute_metrics(transactions)
+        transactions = await compute_metrics(transactions, rpc)
         output_data(transactions)
         # Pretty print the first 5 rows with all columns using pandas built-in formatting
         # for index, row in transactions.head(15).iterrows():
@@ -124,4 +163,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
