@@ -55,6 +55,7 @@ _build/
 *.DS_Store
 *.sqlite
 *.lock
+*.pyz
 
 *.db
 *.pkl
