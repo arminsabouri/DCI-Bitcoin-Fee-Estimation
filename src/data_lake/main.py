@@ -162,5 +162,9 @@ async def main():
         conn.close()
 
 
-if __name__ == "__main__":
+def _entrypoint():
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    _entrypoint()
