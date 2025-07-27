@@ -1,1 +1,10 @@
-waittime_model_sqlite is the current file that I am working with, the other should not be necessary. Cannot upload data files or databases because they are too large
+
+
+## Build standalone data-lake binary
+```bash
+docker build -t py38builder .
+docker create --name tmpbuild py38builder
+docker cp tmpbuild:/app/dist/main ./main
+docker rm tmpbuild
+```
+
