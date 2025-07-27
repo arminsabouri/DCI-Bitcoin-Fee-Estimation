@@ -1,9 +1,10 @@
 pandas
 numpy
 matplotlib
-scikit-learn == 1.6.1
+scikit-learn
 argparse
 requests
 python-bitcoinlib
 bitcoinrpc
 shiv
+pyinstaller
