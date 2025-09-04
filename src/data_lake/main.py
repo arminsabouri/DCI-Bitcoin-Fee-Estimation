@@ -133,8 +133,13 @@ async def compute_metrics(transactions, rpc: BitcoinRPC):
 
 
 def output_data(transactions):
-    with open('transactions.pkl', 'wb') as f:
-        pickle.dump(transactions, f)
+    transactions.to_hdf(
+        "data-lake.h5",
+        key="mempool_transactions",
+        mode="a",
+        format="table",
+        append=True
+    )
 
 
 async def main():

@@ -7,3 +7,4 @@ requests
 python-bitcoinlib
 bitcoinrpc
 pyinstaller
+tables==3.10.1
