@@ -6,5 +6,4 @@ argparse
 requests
 python-bitcoinlib
 bitcoinrpc
-shiv
 pyinstaller
