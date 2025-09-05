@@ -132,18 +132,26 @@ async def compute_metrics(transactions, rpc: BitcoinRPC):
     return transactions
 
 
-def output_data(transactions):
-    with open('transactions.pkl', 'wb') as f:
-        pickle.dump(transactions, f)
+def output_data(transactions, output_path):
+    transactions.to_hdf(
+        output_path,
+        key="mempool_transactions",
+        mode="a",
+        format="table",
+        append=True
+    )
 
 
 async def main():
     p = argparse.ArgumentParser()
+    # TODO output destination should be configurable
     p.add_argument('--db-path', required=True)
     p.add_argument('--rpc-user', required=True)
     p.add_argument('--rpc-password', required=True)
     p.add_argument('--rpc-host', required=True)
     p.add_argument('--rpc-port', required=True)
+    p.add_argument('--output-path', required=False, default="data-lake.h5")
+
     args = p.parse_args()
 
     conn = connect_to_db(args.db_path)
@@ -152,10 +160,8 @@ async def main():
     try:
         transactions = load_data(conn)
         transactions = await compute_metrics(transactions, rpc)
-        output_data(transactions)
-        # Pretty print the first 5 rows with all columns using pandas built-in formatting
-        # for index, row in transactions.head(15).iterrows():
-        #     print(row['tx_id'], row['found_at'], row['mined_at'], row['wait_time'], row['rbf_fee_total'], row['mempool_size'], row['mempool_tx_count'])
+        print(f"outputting data to {args.output_path}")
+        output_data(transactions, args.output_path)
     except Exception as e:
         print(f"Error: {e}")
     finally:
