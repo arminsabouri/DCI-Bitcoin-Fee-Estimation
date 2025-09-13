@@ -25,7 +25,7 @@ def connect_to_db(db_path):
     return conn
 
 
-def load_data(conn):
+def load_data(conn, limit):
     # Get base transactions first
     transactions = pd.read_sql_query("""
         SELECT 
@@ -37,14 +37,16 @@ def load_data(conn):
             AND found_at IS NOT NULL 
             AND PRUNED_AT IS NULL
         ORDER BY found_at DESC
-    """, conn)
+        LIMIT ?
+    """, conn, params=(limit,))
 
     # Get RBF data separately
     rbf_data = pd.read_sql_query("""
         SELECT inputs_hash, MAX(fee_total) as rbf_fee_total
         FROM rbf
         GROUP BY inputs_hash
-    """, conn)
+        LIMIT ?
+    """, conn, params=(limit,))
 
     # Get mempool data separately (pre-aggregate by hour)
     mempool_data = pd.read_sql_query("""
@@ -54,7 +56,8 @@ def load_data(conn):
             AVG(tx_count) as mempool_tx_count
         FROM mempool
         GROUP BY hour
-    """, conn)
+        LIMIT ?
+    """, conn, params=(limit,))
 
     # Merge in Python (much faster than SQL JOINs)
     transactions = transactions.merge(rbf_data, on='inputs_hash', how='left')
@@ -119,9 +122,11 @@ async def compute_metrics(transactions, rpc: BitcoinRPC):
                 timeout=10
             )
         except asyncio.TimeoutError:
-            print(f"Timeout occurred while fetching transaction data for txid {txid}")
+            print(
+                f"Timeout occurred while fetching transaction data for txid {txid}")
             confs = []
-        confs = [prev_tx['confirmations'] for prev_tx in confs if 'confirmations' in prev_tx]
+        confs = [prev_tx['confirmations']
+                 for prev_tx in confs if 'confirmations' in prev_tx]
         return min(confs, default=0)
     print("Computing weight and size")
     transactions[['weight', 'size']] = transactions['tx_data'].apply(
@@ -160,15 +165,18 @@ async def main():
     p.add_argument('--rpc-host', required=True)
     p.add_argument('--rpc-port', required=True)
     p.add_argument('--output-path', required=False, default="data-lake.h5")
+    p.add_argument('--limit', required=False, default=10_000)
 
     args = p.parse_args()
 
     conn = connect_to_db(args.db_path)
     rpc = connect_to_rpc(args.rpc_user, args.rpc_password,
                          args.rpc_host, args.rpc_port)
+
+    print(f"Loading data from {args.db_path} with limit {args.limit}")
     try:
         print("Loading data")
-        transactions = load_data(conn)
+        transactions = load_data(conn, args.limit)
         print("Computing metrics")
         transactions = await compute_metrics(transactions, rpc)
         print(f"outputting data to {args.output_path}")
