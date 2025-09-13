@@ -32,7 +32,10 @@ def load_data(conn):
             transactions.*,
             (mined_at - found_at) AS waittime
         FROM transactions
-        WHERE mined_at IS NOT NULL AND found_at IS NOT NULL
+        WHERE 
+            mined_at IS NOT NULL 
+            AND found_at IS NOT NULL 
+            AND PRUNED_AT IS NULL
         ORDER BY found_at DESC
     """, conn)
 
