@@ -120,7 +120,7 @@ async def compute_metrics(transactions, rpc: BitcoinRPC):
         for vin in tx.vin:
             try:
                 prev_txid = str(vin.prevout).split(':')[0]
-                prev_tx = await asyncio.wait_for(rpc.getrawtransaction(prev_txid, True), timeout=5)
+                prev_tx = await rpc.getrawtransaction(prev_txid, True)
                 if 'confirmations' in prev_tx:
                     confs.append(prev_tx['confirmations'])
             except Exception as e:
@@ -143,6 +143,7 @@ async def compute_metrics(transactions, rpc: BitcoinRPC):
         *[get_min_respend_time(tx_hex) for tx_hex in transactions['tx_data']]
     )
     transactions['min_respend_time'] = min_respend_times
+    transactions = transactions[transactions['min_respend_time'] != -1]
 
     # We can drop tx_data. We should extract any data we can from it and then drop it.
     transactions = transactions.drop(columns=['tx_data'])
