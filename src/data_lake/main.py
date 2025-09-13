@@ -118,9 +118,12 @@ async def compute_metrics(transactions, rpc: BitcoinRPC):
             return 0
         return min(confs)
 
+    print("Computing weight and size")
     transactions[['weight', 'size']] = transactions['tx_data'].apply(
         lambda tx_hex: pd.Series(get_weight_and_size(tx_hex))
     )
+
+    print("Computing min_respend_time")
     # Compute min_respend_time for each transaction asynchronously
     min_respend_times = await asyncio.gather(
         *[get_min_respend_time(tx_hex) for tx_hex in transactions['tx_data']]
@@ -143,6 +146,7 @@ def output_data(transactions, output_path):
 
 
 async def main():
+    print("Starting data lake")
     p = argparse.ArgumentParser()
     # TODO output destination should be configurable
     p.add_argument('--db-path', required=True)
@@ -158,7 +162,9 @@ async def main():
     rpc = connect_to_rpc(args.rpc_user, args.rpc_password,
                          args.rpc_host, args.rpc_port)
     try:
+        print("Loading data")
         transactions = load_data(conn)
+        print("Computing metrics")
         transactions = await compute_metrics(transactions, rpc)
         print(f"outputting data to {args.output_path}")
         output_data(transactions, args.output_path)
