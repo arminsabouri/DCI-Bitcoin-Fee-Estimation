@@ -106,18 +106,13 @@ async def compute_metrics(transactions, rpc: BitcoinRPC):
 
     async def get_min_respend_time(tx_hex: str):
         tx = ser_tx(tx_hex)
-        confs = []
-        for vin in tx.vin:
-            txid = str(vin.prevout).split(':')[0]
-            try:
-                prev_tx = await rpc.getrawtransaction(txid, True)
-                confs.append(prev_tx['confirmations'])
-            except Exception as e:
-                print(f"Error: {e}")
-        if len(confs) == 0:
-            return 0
-        return min(confs)
-
+        txid = tx.GetTxid().hex()
+        print(f"Computing min_respend_time for txid {txid}")
+        confs = await asyncio.gather(
+            *[rpc.getrawtransaction(str(vin.prevout).split(':')[0], True) for vin in tx.vin]
+        )
+        confs = [prev_tx['confirmations'] for prev_tx in confs if 'confirmations' in prev_tx]
+        return min(confs, default=0)
     print("Computing weight and size")
     transactions[['weight', 'size']] = transactions['tx_data'].apply(
         lambda tx_hex: pd.Series(get_weight_and_size(tx_hex))
