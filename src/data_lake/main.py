@@ -108,9 +108,16 @@ async def compute_metrics(transactions, rpc: BitcoinRPC):
         tx = ser_tx(tx_hex)
         txid = tx.GetTxid().hex()
         print(f"Computing min_respend_time for txid {txid}")
-        confs = await asyncio.gather(
-            *[rpc.getrawtransaction(str(vin.prevout).split(':')[0], True) for vin in tx.vin]
-        )
+        try:
+            confs = await asyncio.wait_for(
+                asyncio.gather(
+                    *[rpc.getrawtransaction(str(vin.prevout).split(':')[0], True) for vin in tx.vin]
+                ),
+                timeout=10
+            )
+        except asyncio.TimeoutError:
+            print(f"Timeout occurred while fetching transaction data for txid {txid}")
+            confs = []
         confs = [prev_tx['confirmations'] for prev_tx in confs if 'confirmations' in prev_tx]
         return min(confs, default=0)
     print("Computing weight and size")
