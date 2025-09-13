@@ -16,7 +16,7 @@ import asyncio
 
 def connect_to_rpc(rpc_user, rpc_password, rpc_host, rpc_port):
     host = f"http://{rpc_host}:{rpc_port}"
-    rpc = BitcoinRPC.from_config(host, (rpc_user, rpc_password))
+    rpc = BitcoinRPC.from_config(host, (rpc_user, rpc_password), timeout=10)
     return rpc
 
 
@@ -28,13 +28,13 @@ def connect_to_db(db_path):
 def load_data(conn, limit):
     # Get base transactions first
     transactions = pd.read_sql_query("""
-        SELECT 
+        SELECT
             transactions.*,
             (mined_at - found_at) AS waittime
         FROM transactions
-        WHERE 
-            mined_at IS NOT NULL 
-            AND found_at IS NOT NULL 
+        WHERE
+            mined_at IS NOT NULL
+            AND found_at IS NOT NULL
             AND PRUNED_AT IS NULL
         ORDER BY found_at DESC
         LIMIT ?
@@ -45,17 +45,19 @@ def load_data(conn, limit):
         SELECT inputs_hash, MAX(fee_total) as rbf_fee_total
         FROM rbf
         GROUP BY inputs_hash
+        ORDER BY created_at DESC
         LIMIT ?
     """, conn, params=(limit,))
 
     # Get mempool data separately (pre-aggregate by hour)
     mempool_data = pd.read_sql_query("""
-        SELECT 
+        SELECT
             strftime('%Y-%m-%d %H:00:00', datetime(created_at, 'unixepoch')) as hour,
             AVG(size) as mempool_size,
             AVG(tx_count) as mempool_tx_count
         FROM mempool
         GROUP BY hour
+        ORDER BY created_at DESC
         LIMIT ?
     """, conn, params=(limit,))
 
@@ -114,20 +116,22 @@ async def compute_metrics(transactions, rpc: BitcoinRPC):
         tx = ser_tx(tx_hex)
         txid = tx.GetTxid().hex()
         print(f"Computing min_respend_time for txid {txid}")
-        try:
-            confs = await asyncio.wait_for(
-                asyncio.gather(
-                    *[rpc.getrawtransaction(str(vin.prevout).split(':')[0], True) for vin in tx.vin]
-                ),
-                timeout=10
-            )
-        except asyncio.TimeoutError:
-            print(
-                f"Timeout occurred while fetching transaction data for txid {txid}")
-            confs = []
-        confs = [prev_tx['confirmations']
-                 for prev_tx in confs if 'confirmations' in prev_tx]
+        confs = []
+        for vin in tx.vin:
+            try:
+                prev_txid = str(vin.prevout).split(':')[0]
+                prev_tx = await asyncio.wait_for(rpc.getrawtransaction(prev_txid, True), timeout=5)
+                if 'confirmations' in prev_tx:
+                    confs.append(prev_tx['confirmations'])
+            except Exception as e:
+                print(f"Error fetching transaction {prev_txid}: {e}")
+                return -1
+
+        if len(confs) == 0:
+            return -1
+
         return min(confs, default=0)
+
     print("Computing weight and size")
     transactions[['weight', 'size']] = transactions['tx_data'].apply(
         lambda tx_hex: pd.Series(get_weight_and_size(tx_hex))
