@@ -89,6 +89,14 @@ def get_tx_weight(tx_hex: str) -> int:
     return tx.calc_weight()
 
 
+block_hash_to_height = {}
+async def get_block_height(block_hash: str, rpc: BitcoinRPC):
+    if block_hash in block_hash_to_height:
+        return block_hash_to_height[block_hash]
+    block = await rpc.acall('getblock', [block_hash])
+    block_hash_to_height[block_hash] = block['height']
+    return block['height']
+
 async def compute_metrics(transactions, rpc: BitcoinRPC):
     print(f"total transactions length: {len(transactions)}")
     # Ensure there are no null values or 0 values for found_at or mined_at
@@ -112,25 +120,25 @@ async def compute_metrics(transactions, rpc: BitcoinRPC):
         tx = ser_tx(tx_hex)
         return tx.calc_weight(), len(tx_bytes)
 
-    async def get_min_respend_time(tx_hex: str):
-        tx = ser_tx(tx_hex)
-        txid = tx.GetTxid().hex()
-        print(f"Computing min_respend_time for txid {txid}")
-        confs = []
-        for vin in tx.vin:
-            try:
-                prev_txid = str(vin.prevout).split(':')[0]
-                prev_tx = await rpc.getrawtransaction(prev_txid, True)
-                if 'confirmations' in prev_tx:
-                    confs.append(prev_tx['confirmations'])
-            except Exception as e:
-                print(f"Error fetching transaction {prev_txid}: {e}")
+    async def get_min_respend_time(txid: str):
+        try:
+            print(f"Computing min_respend_time for txid {txid}")
+            confs = []
+            ver_tx = await rpc.acall('getrawtransaction', [txid, 2])
+            if 'blockhash' not in ver_tx:
+                return -1
+            conf_height = await get_block_height(ver_tx['blockhash'], rpc)
+            for vin in ver_tx['vin']:
+                if 'prevout' in vin:
+                    confs.append(conf_height - vin['prevout']['height'])
+
+            if len(confs) == 0:
                 return -1
 
-        if len(confs) == 0:
+            return min(confs, default=0)
+        except Exception as e:
+            print(f"Error fetching transaction {txid}: {e}")
             return -1
-
-        return min(confs, default=0)
 
     print("Computing weight and size")
     transactions[['weight', 'size']] = transactions['tx_data'].apply(
@@ -140,7 +148,7 @@ async def compute_metrics(transactions, rpc: BitcoinRPC):
     print("Computing min_respend_time")
     # Compute min_respend_time for each transaction asynchronously
     min_respend_times = await asyncio.gather(
-        *[get_min_respend_time(tx_hex) for tx_hex in transactions['tx_data']]
+        *[get_min_respend_time(txid) for txid in transactions['tx_id']]
     )
     transactions['min_respend_time'] = min_respend_times
     transactions = transactions[transactions['min_respend_time'] != -1]
@@ -163,7 +171,6 @@ def output_data(transactions, output_path):
 async def main():
     print("Starting data lake")
     p = argparse.ArgumentParser()
-    # TODO output destination should be configurable
     p.add_argument('--db-path', required=True)
     p.add_argument('--rpc-user', required=True)
     p.add_argument('--rpc-password', required=True)
