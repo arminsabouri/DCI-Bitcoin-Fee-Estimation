@@ -14,10 +14,33 @@ from bitcoinrpc import BitcoinRPC
 import asyncio
 
 
-def connect_to_rpc(rpc_user, rpc_password, rpc_host, rpc_port):
+async def connect_to_rpc(rpc_user, rpc_password, rpc_host, rpc_port):
     host = f"http://{rpc_host}:{rpc_port}"
-    rpc = BitcoinRPC.from_config(host, (rpc_user, rpc_password), timeout=10)
-    return rpc
+    try:
+        print(f"Attempting to connect to: {host}")
+        print(f"Using credentials: user={rpc_user}")
+        rpc = BitcoinRPC.from_config(host, (rpc_user, rpc_password), timeout=10)
+        # Test the connection
+        print("Testing connection with getblockchaininfo...")
+        test_result = await rpc.getblockchaininfo()
+        print(f"Successfully connected to bitcoind. Block height: {test_result['blocks']}")
+        return rpc
+    except Exception as e:
+        print(f"Failed to connect to bitcoind: {e}")
+        print(f"Connection details: {host}")
+        print(f"Username: {rpc_user}")
+        print(f"Error type: {type(e)}")
+        # Try a simple HTTP request to see what we get
+        try:
+            import httpx
+            async with httpx.AsyncClient() as client:
+                response = await client.get(host, timeout=5)
+                print(f"HTTP response status: {response.status_code}")
+                print(f"HTTP response headers: {dict(response.headers)}")
+                print(f"HTTP response body (first 200 chars): {response.text[:200]}")
+        except Exception as http_e:
+            print(f"HTTP test also failed: {http_e}")
+        raise
 
 
 def connect_to_db(db_path):
@@ -138,6 +161,15 @@ async def compute_metrics(transactions, rpc: BitcoinRPC):
             return min(confs, default=0)
         except Exception as e:
             print(f"Error fetching transaction {txid}: {e}")
+            print(f"Error type: {type(e)}")
+            # Try to get more details about the RPC response
+            try:
+                print("Attempting to debug RPC response...")
+                # Test a simple RPC call to see if authentication is working
+                test_result = await rpc.acall('getblockchaininfo')
+                print(f"RPC connection is working, blockchain info: {test_result}")
+            except Exception as debug_e:
+                print(f"Debug RPC call also failed: {debug_e}")
             return -1
 
     print("Computing weight and size")
@@ -182,8 +214,8 @@ async def main():
     args = p.parse_args()
 
     conn = connect_to_db(args.db_path)
-    rpc = connect_to_rpc(args.rpc_user, args.rpc_password,
-                         args.rpc_host, args.rpc_port)
+    rpc = await connect_to_rpc(args.rpc_user, args.rpc_password,
+                               args.rpc_host, args.rpc_port)
 
     print(f"Loading data from {args.db_path} with limit {args.limit}")
     try:
