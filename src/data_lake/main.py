@@ -17,11 +17,8 @@ import asyncio
 async def connect_to_rpc(rpc_user, rpc_password, rpc_host, rpc_port):
     host = f"http://{rpc_host}:{rpc_port}"
     try:
-        print(f"Attempting to connect to: {host}")
-        print(f"Using credentials: user={rpc_user}")
         rpc = BitcoinRPC.from_config(host, (rpc_user, rpc_password), timeout=10)
         # Test the connection
-        print("Testing connection with getblockchaininfo...")
         test_result = await rpc.getblockchaininfo()
         print(f"Successfully connected to bitcoind. Block height: {test_result['blocks']}")
         return rpc
@@ -29,17 +26,6 @@ async def connect_to_rpc(rpc_user, rpc_password, rpc_host, rpc_port):
         print(f"Failed to connect to bitcoind: {e}")
         print(f"Connection details: {host}")
         print(f"Username: {rpc_user}")
-        print(f"Error type: {type(e)}")
-        # Try a simple HTTP request to see what we get
-        try:
-            import httpx
-            async with httpx.AsyncClient() as client:
-                response = await client.get(host, timeout=5)
-                print(f"HTTP response status: {response.status_code}")
-                print(f"HTTP response headers: {dict(response.headers)}")
-                print(f"HTTP response body (first 200 chars): {response.text[:200]}")
-        except Exception as http_e:
-            print(f"HTTP test also failed: {http_e}")
         raise
 
 
@@ -120,7 +106,7 @@ async def get_block_height(block_hash: str, rpc: BitcoinRPC):
     block_hash_to_height[block_hash] = block['height']
     return block['height']
 
-async def compute_metrics(transactions, rpc: BitcoinRPC):
+async def compute_metrics(transactions, rpc: BitcoinRPC, debug: bool):
     print(f"total transactions length: {len(transactions)}")
     # Ensure there are no null values or 0 values for found_at or mined_at
     assert transactions[transactions['found_at'] >
@@ -143,34 +129,38 @@ async def compute_metrics(transactions, rpc: BitcoinRPC):
         tx = ser_tx(tx_hex)
         return tx.calc_weight(), len(tx_bytes)
 
+    # allow only 8 concurrent RPCs requests
+    sem = asyncio.Semaphore(8)
+
     async def get_min_respend_time(txid: str):
-        try:
-            print(f"Computing min_respend_time for txid {txid}")
-            confs = []
-            ver_tx = await rpc.acall('getrawtransaction', [txid, 2])
-            if 'blockhash' not in ver_tx:
-                return -1
-            conf_height = await get_block_height(ver_tx['blockhash'], rpc)
-            for vin in ver_tx['vin']:
-                if 'prevout' in vin:
-                    confs.append(conf_height - vin['prevout']['height'])
-
-            if len(confs) == 0:
-                return -1
-
-            return min(confs, default=0)
-        except Exception as e:
-            print(f"Error fetching transaction {txid}: {e}")
-            print(f"Error type: {type(e)}")
-            # Try to get more details about the RPC response
+        async with sem:
             try:
-                print("Attempting to debug RPC response...")
-                # Test a simple RPC call to see if authentication is working
-                test_result = await rpc.acall('getblockchaininfo')
-                print(f"RPC connection is working, blockchain info: {test_result}")
-            except Exception as debug_e:
-                print(f"Debug RPC call also failed: {debug_e}")
-            return -1
+                print(f"Computing min_respend_time for txid {txid}")
+                confs = []
+                ver_tx = await rpc.acall('getrawtransaction', [txid, 2])
+                if 'blockhash' not in ver_tx:
+                    print(f"No blockhash found for txid {txid}")
+                    return -1
+                conf_height = await get_block_height(ver_tx['blockhash'], rpc)
+                if debug:
+                    print(f"Block height: {conf_height}")
+                
+                for i, vin in enumerate(ver_tx['vin']):
+                    if 'prevout' in vin and 'height' in vin['prevout']:
+                        prev_height = vin['prevout']['height']
+                        conf_diff = conf_height - prev_height
+                        confs.append(conf_diff)
+                    else:
+                        print(f"Vin {i}: No prevout or height found")
+
+                if len(confs) == 0:
+                    print(f"No valid prevout heights found for txid {txid}")
+                    return -1
+
+                return min(confs, default=0)
+            except Exception as e:
+                print(f"Error fetching transaction {txid}: {e}")
+                return -1
 
     print("Computing weight and size")
     transactions[['weight', 'size']] = transactions['tx_data'].apply(
@@ -210,6 +200,7 @@ async def main():
     p.add_argument('--rpc-port', required=True)
     p.add_argument('--output-path', required=False, default="data-lake.h5")
     p.add_argument('--limit', required=False, default=10_000)
+    p.add_argument('--debug', required=False, default=False)
 
     args = p.parse_args()
 
@@ -222,7 +213,7 @@ async def main():
         print("Loading data")
         transactions = load_data(conn, args.limit)
         print("Computing metrics")
-        transactions = await compute_metrics(transactions, rpc)
+        transactions = await compute_metrics(transactions, rpc, args.debug)
         print(f"outputting data to {args.output_path}")
         output_data(transactions, args.output_path)
     except Exception as e:
