@@ -120,10 +120,6 @@ async def compute_metrics(transactions, rpc: BitcoinRPC, debug: bool, exchange_a
     assert transactions[transactions['mined_at'] >
                         0].shape[0] == transactions.shape[0], "mined_at has null values"
 
-    # Remove outliers from waittime
-    transactions = remove_outliers_iqr(transactions, 'waittime')
-    print(f"transactions after removing outliers: {len(transactions)}")
-
     def ser_tx(tx_hex: str) -> CTransaction:
         tx_bytes = bytes.fromhex(tx_hex)
         stream = BytesIO(tx_bytes)
