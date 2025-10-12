@@ -12,15 +12,18 @@ from bitcoin.core import CTransaction
 from io import BytesIO
 from bitcoinrpc import BitcoinRPC
 import asyncio
+from io import StringIO
 
 
 async def connect_to_rpc(rpc_user, rpc_password, rpc_host, rpc_port):
     host = f"http://{rpc_host}:{rpc_port}"
     try:
-        rpc = BitcoinRPC.from_config(host, (rpc_user, rpc_password), timeout=10)
+        rpc = BitcoinRPC.from_config(
+            host, (rpc_user, rpc_password), timeout=10)
         # Test the connection
         test_result = await rpc.getblockchaininfo()
-        print(f"Successfully connected to bitcoind. Block height: {test_result['blocks']}")
+        print(
+            f"Successfully connected to bitcoind. Block height: {test_result['blocks']}")
         return rpc
     except Exception as e:
         print(f"Failed to connect to bitcoind: {e}")
@@ -99,6 +102,8 @@ def get_tx_weight(tx_hex: str) -> int:
 
 
 block_hash_to_height = {}
+
+
 async def get_block_height(block_hash: str, rpc: BitcoinRPC):
     if block_hash in block_hash_to_height:
         return block_hash_to_height[block_hash]
@@ -106,7 +111,8 @@ async def get_block_height(block_hash: str, rpc: BitcoinRPC):
     block_hash_to_height[block_hash] = block['height']
     return block['height']
 
-async def compute_metrics(transactions, rpc: BitcoinRPC, debug: bool):
+
+async def compute_metrics(transactions, rpc: BitcoinRPC, debug: bool, exchange_addresses: pd.DataFrame):
     print(f"total transactions length: {len(transactions)}")
     # Ensure there are no null values or 0 values for found_at or mined_at
     assert transactions[transactions['found_at'] >
@@ -132,35 +138,54 @@ async def compute_metrics(transactions, rpc: BitcoinRPC, debug: bool):
     # allow only 8 concurrent RPCs requests
     sem = asyncio.Semaphore(8)
 
-    async def get_min_respend_time(txid: str):
+    # Return type (min respend time, sender is a known exchange, sending to known exchange address)
+    async def get_min_respend_time(txid: str) -> (int, bool, bool):
         async with sem:
             try:
                 print(f"Computing min_respend_time for txid {txid}")
                 confs = []
+                exchange_is_sender = False
+                exchange_is_receiver = False
                 ver_tx = await rpc.acall('getrawtransaction', [txid, 2])
                 if 'blockhash' not in ver_tx:
                     print(f"No blockhash found for txid {txid}")
-                    return -1
+                    return -1, exchange_is_sender, exchange_is_receiver
                 conf_height = await get_block_height(ver_tx['blockhash'], rpc)
                 if debug:
                     print(f"Block height: {conf_height}")
-                
+
                 for i, vin in enumerate(ver_tx['vin']):
                     if 'prevout' in vin and 'height' in vin['prevout']:
                         prev_height = vin['prevout']['height']
                         conf_diff = conf_height - prev_height
                         confs.append(conf_diff)
+
+                        # Get the address of the previous output
+                        if 'scriptPubKey' in vin['prevout'] and 'addresses' in vin['prevout']['scriptPubKey']:
+                            prev_address = vin['prevout']['scriptPubKey']['address']
+                            if prev_address in exchange_addresses['Address']:
+                                exchange_is_sender = True
                     else:
                         print(f"Vin {i}: No prevout or height found")
 
+                for i, vout in enumerate(ver_tx['vout']):
+                    if 'scriptPubKey' in vout and 'addresses' in vout['scriptPubKey']:
+                        vout_address = vout['scriptPubKey']['address']
+                        if vout_address in exchange_addresses['Address']:
+                            exchange_is_receiver = True
+
                 if len(confs) == 0:
                     print(f"No valid prevout heights found for txid {txid}")
-                    return -1
+                    return -1, exchange_is_sender, exchange_is_receiver
 
-                return min(confs, default=0)
+                if debug:
+                    print(
+                        f"exchange_is_sender: {exchange_is_sender}, exchange_is_receiver: {exchange_is_receiver}")
+
+                return min(confs, default=0), exchange_is_sender, exchange_is_receiver
             except Exception as e:
                 print(f"Error fetching transaction {txid}: {e}")
-                return -1
+                return -1, False, False
 
     print("Computing weight and size")
     transactions[['weight', 'size']] = transactions['tx_data'].apply(
@@ -172,7 +197,10 @@ async def compute_metrics(transactions, rpc: BitcoinRPC, debug: bool):
     min_respend_times = await asyncio.gather(
         *[get_min_respend_time(txid) for txid in transactions['tx_id']]
     )
-    transactions['min_respend_time'] = min_respend_times
+
+    transactions['min_respend_time'] = [x[0] for x in min_respend_times]
+    transactions['exchange_is_sender'] = [x[1] for x in min_respend_times]
+    transactions['exchange_is_receiver'] = [x[2] for x in min_respend_times]
     transactions = transactions[transactions['min_respend_time'] != -1]
 
     # We can drop tx_data. We should extract any data we can from it and then drop it.
@@ -188,6 +216,38 @@ def output_data(transactions, output_path):
         format="table",
         append=True
     )
+
+
+def load_exchange_addresses():
+    csv = """
+    Rank,Address,Label/Notes
+1,34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo,Binance - Cold Wallet
+3,3M219KR5vEneNb47ewrPfWyb5jQ2DjxRP6,Binance - Cold Wallet
+4,bc1qgdjqv0av3q56jvd82tkdjpy7gdp9ut8tlqmgrpmv24sq90ecnvqqjwv97,Bitfinex - Cold Wallet
+11,3LYJfcfHPXYJreMsASk2jkn69LWEYKzexb,Binance - BTCB Reserve
+15,3MgEAFWu1HKSnZ5ZsC8qf61ZW18xrP5pgd,OKEx
+23,bc1qk4m9zv5tnxf2pddd565wugsjrkqkfn90aa0wypj2530f4f7tjwrqntpens,BitMEX - Cold Wallet
+38,3JZq4atUahhuA9rLhXLMhhTo133J9rF97j,Bitfinex - Cold Wallet
+44,bc1qx2x5cqhymfcnjtg902ky6u5t5htmt7fvqztdsm028hkrvxcl4t2sjtpd9l,Bitbank - Cold Wallet
+47,bc1qr4dl5wa7kl8yu792dceg9z5knl2gkn220lk7a9,Crypto.com - Cold Wallet
+49,1PJiGp2yDLvUgqeBsuZVCBADArNsk6XEiw,Binance - Cold Wallet
+50,3FM9vDYsN2iuMPKWjAcqgyahdwdrUxhbJ3,OKEx
+52,34HpHYiyQwg69gFmCq2BGHjF1DZnZnBeBP,Binance - Cold Wallet
+54,38UmuUqPCrFmQo4khkomQwZ4VbY2nZMJ67,OKEx
+59,bc1qchctnvmdva5z9vrpxkkxck64v7nmzdtyxsrq64,BitMEX
+82,1DcT5Wij5tfb3oVViF8mA8p4WrG98ahZPT,OKX
+99,bc1qm34lsc65zpw79lxes69zkqmk6ee3ewf0j77s3h,Binance
+205,1LnoZawVFFQihU8d8ntxLMpYheZUfyeVAK,OKX
+244,3DVJfEsDTPkGDvqPCLC41X85L1B1DQWDyh,OKEx
+268,bc1quhruqrghgcca950rvhtrg7cpd7u8k6svpzgzmrjy8xyukacl5lkq0r8l2d,OKX - Hot Wallet
+293,3H5JTt42K7RmZtromfTSefcMEFMMe18pMD,Poloniex - Cold Wallet
+334,3E5EPMGRL5PC6YDCLcHLVu9ayC3DysMpau,OKEx
+336,bc1q4c8n5t00jmj8temxdgcc3t32nkg2wjwz24lywv,Crypto.com
+341,bc1q7ramrn7krmgl8ja8vjm9g25a5t98l6kfyqgewe,Coinshares
+378,1Kr6QSydW9bFQG1mXiPNNu6WpJGmUa9i1g,Bitfinex
+    """
+    exchange_addresses = pd.read_csv(StringIO(csv))
+    return exchange_addresses
 
 
 async def main():
@@ -207,13 +267,14 @@ async def main():
     conn = connect_to_db(args.db_path)
     rpc = await connect_to_rpc(args.rpc_user, args.rpc_password,
                                args.rpc_host, args.rpc_port)
+    exchange_addresses = load_exchange_addresses()
 
     print(f"Loading data from {args.db_path} with limit {args.limit}")
     try:
         print("Loading data")
         transactions = load_data(conn, args.limit)
         print("Computing metrics")
-        transactions = await compute_metrics(transactions, rpc, args.debug)
+        transactions = await compute_metrics(transactions, rpc, args.debug, exchange_addresses)
         print(f"outputting data to {args.output_path}")
         output_data(transactions, args.output_path)
     except Exception as e:
