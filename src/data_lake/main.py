@@ -199,8 +199,6 @@ async def compute_metrics(transactions, rpc: BitcoinRPC, debug: bool, exchange_a
     transactions['exchange_is_receiver'] = [x[2] for x in min_respend_times]
     transactions = transactions[transactions['min_respend_time'] != -1]
 
-    # We can drop tx_data. We should extract any data we can from it and then drop it.
-    transactions = transactions.drop(columns=['tx_data'])
     return transactions
 
 
