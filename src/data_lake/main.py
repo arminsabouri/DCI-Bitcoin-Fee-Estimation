@@ -148,7 +148,8 @@ async def compute_metrics(transactions, rpc: BitcoinRPC, debug: bool, exchange_a
     sem = asyncio.Semaphore(8)
 
     # Return type (min respend time, sender is a known exchange, sending to known exchange address)
-    async def get_min_respend_time(txid: str) -> (int, bool, bool):
+    # TODO: disabled is from and too exchange until we have a better source of exchange addresses
+    async def get_min_respend_time(txid: str) -> (int):
         async with sem:
             try:
                 print(f"Computing min_respend_time for txid {txid}")
@@ -211,8 +212,9 @@ async def compute_metrics(transactions, rpc: BitcoinRPC, debug: bool, exchange_a
     )
 
     transactions['min_respend_time'] = [x[0] for x in min_respend_times]
-    transactions['exchange_is_sender'] = [x[1] for x in min_respend_times]
-    transactions['exchange_is_receiver'] = [x[2] for x in min_respend_times]
+    # TODO: disabled is from and too exchange until we have a better source of exchange addresses
+    # transactions['exchange_is_sender'] = [x[1] for x in min_respend_times]
+    # transactions['exchange_is_receiver'] = [x[2] for x in min_respend_times]
     transactions = transactions[transactions['min_respend_time'] != -1]
 
     return transactions
