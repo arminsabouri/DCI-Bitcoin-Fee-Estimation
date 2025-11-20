@@ -10,9 +10,10 @@ import argparse
 import pickle
 from bitcoin.core import CTransaction
 from io import BytesIO
+from io import StringIO
 from bitcoinrpc import BitcoinRPC
 import asyncio
-from io import StringIO
+import json
 
 
 async def connect_to_rpc(rpc_user, rpc_password, rpc_host, rpc_port):
@@ -126,10 +127,22 @@ async def compute_metrics(transactions, rpc: BitcoinRPC, debug: bool, exchange_a
         tx = CTransaction.stream_deserialize(stream)
         return tx
 
-    def get_weight_and_size(tx_hex: str):
+    def get_tx_stats(tx_hex: str) -> (int, int, [int], int, [int]):
         tx_bytes = bytes.fromhex(tx_hex)
         tx = ser_tx(tx_hex)
-        return tx.calc_weight(), len(tx_bytes)
+        output_amounts = [vout.nValue for vout in tx.vout]
+
+        # Calculate the individual weights of the outputs.
+        # Bitcoin Core does not attribute a "weight" per output directly, but we can approximate
+        # each vout's serialized size and its WEIGHT as 4x its byte size (witness discount doesn't apply to vouts).
+        output_weights = []
+        for vout in tx.vout:
+            buf = BytesIO()
+            vout.stream_serialize(buf)
+            vout_len = buf.tell()
+            output_weights.append(vout_len * 4)
+
+        return tx.calc_weight(), len(tx_bytes), output_amounts, sum(output_amounts), output_weights
 
     # allow only 8 concurrent RPCs requests
     sem = asyncio.Semaphore(8)
@@ -184,9 +197,12 @@ async def compute_metrics(transactions, rpc: BitcoinRPC, debug: bool, exchange_a
                 return -1, False, False
 
     print("Computing weight and size")
-    transactions[['weight', 'size']] = transactions['tx_data'].apply(
-        lambda tx_hex: pd.Series(get_weight_and_size(tx_hex))
+    transactions[['weight', 'size', 'output_amounts', 'total_output_amount', 'output_weights']] = transactions['tx_data'].apply(
+        lambda tx_hex: pd.Series(get_tx_stats(tx_hex))
     )
+
+    transactions['output_amounts'] = transactions['output_amounts'].apply(lambda x: json.dumps(x))
+    transactions['output_weights'] = transactions['output_weights'].apply(lambda x: json.dumps(x))
 
     print("Computing min_respend_time")
     # Compute min_respend_time for each transaction asynchronously
