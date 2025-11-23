@@ -1,7 +1,5 @@
 pandas
 numpy
-matplotlib
-scikit-learn
 argparse
 requests
 python-bitcoinlib

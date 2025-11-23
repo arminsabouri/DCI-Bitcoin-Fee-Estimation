@@ -1,4 +1,4 @@
-#! /usr/bin/env python3
+#!/usr/bin/env python3
 
 # This sub-package will parse sqlite db tables: transactions, mempool, and rbf.
 # And create one pandas dataframe where rows are transactions and columns are features.
@@ -38,31 +38,17 @@ def connect_to_db(db_path):
     return conn
 
 
-def load_data(conn, limit):
-    # Get base transactions first
-    transactions = pd.read_sql_query("""
-        SELECT
-            transactions.*,
-            (mined_at - found_at) AS waittime
-        FROM transactions
-        WHERE
-            mined_at IS NOT NULL
-            AND found_at IS NOT NULL
-            AND PRUNED_AT IS NULL
-        ORDER BY found_at DESC
-        LIMIT ?
-    """, conn, params=(limit,))
-
-    # Get RBF data separately
+def load_rbf(conn):
     rbf_data = pd.read_sql_query("""
         SELECT inputs_hash, MAX(fee_total) as rbf_fee_total
         FROM rbf
         GROUP BY inputs_hash
         ORDER BY created_at DESC
-        LIMIT ?
-    """, conn, params=(limit,))
+    """, conn)
+    return rbf_data
 
-    # Get mempool data separately (pre-aggregate by hour)
+
+def load_mempool(conn):
     mempool_data = pd.read_sql_query("""
         SELECT
             strftime('%Y-%m-%d %H:00:00', datetime(created_at, 'unixepoch')) as hour,
@@ -71,19 +57,56 @@ def load_data(conn, limit):
         FROM mempool
         GROUP BY hour
         ORDER BY created_at DESC
-        LIMIT ?
-    """, conn, params=(limit,))
+    """, conn)
+    return mempool_data
 
-    # Merge in Python (much faster than SQL JOINs)
+
+def merge_datasets(transactions, rbf_data, mempool_data):
+    # merge the rbf data into the transactions dataframe
     transactions = transactions.merge(rbf_data, on='inputs_hash', how='left')
 
-    # Add hour column for mempool matching
+    # add the hour column to the transactions dataframe
     transactions['hour'] = pd.to_datetime(
         transactions['found_at'], unit='s').dt.floor('H')
     mempool_data['hour'] = pd.to_datetime(mempool_data['hour'])
-    transactions = transactions.merge(mempool_data, on='hour', how='left')
 
-    return transactions.drop('hour', axis=1)
+    transactions = transactions.merge(mempool_data, on='hour', how='left')
+    # after merge, drop the hour column
+    transactions = transactions.drop('hour', axis=1)
+    return transactions
+
+
+def load_transactions(conn, limit: int):
+    last_rowid = 0
+    while True:
+        query = """
+            SELECT
+                transactions.*,
+                (mined_at - found_at) AS waittime,
+                rowid
+            FROM transactions
+            WHERE
+                mined_at IS NOT NULL
+                AND found_at IS NOT NULL
+                AND PRUNED_AT IS NULL
+                AND rowid > ?
+            ORDER BY rowid ASC
+            LIMIT ?
+        """
+        transactions = pd.read_sql_query(
+            query, conn, params=(last_rowid, limit))
+
+        print(f"transactions: {len(transactions)}")
+        if transactions.empty:
+            break
+
+        last_rowid = transactions['rowid'].max()
+        print(f"last_rowid: {last_rowid}")
+
+        # Sort here to avoid pagination headaches in sql
+        transactions = transactions.sort_values(["found_at"], ascending=False)
+
+        yield transactions
 
 
 def remove_outliers_iqr(df, column):
@@ -203,8 +226,10 @@ async def compute_metrics(transactions, rpc: BitcoinRPC, debug: bool, exchange_a
         lambda tx_hex: pd.Series(get_tx_stats(tx_hex))
     )
 
-    transactions['output_amounts'] = transactions['output_amounts'].apply(lambda x: json.dumps(x))
-    transactions['output_weights'] = transactions['output_weights'].apply(lambda x: json.dumps(x))
+    transactions['output_amounts'] = transactions['output_amounts'].apply(
+        lambda x: json.dumps(x))
+    transactions['output_weights'] = transactions['output_weights'].apply(
+        lambda x: json.dumps(x))
 
     print("Computing min_respend_time")
     # Compute min_respend_time for each transaction asynchronously
@@ -283,14 +308,22 @@ async def main():
                                args.rpc_host, args.rpc_port)
     exchange_addresses = load_exchange_addresses()
 
-    print(f"Loading data from {args.db_path} with limit {args.limit}")
     try:
         print("Loading data")
-        transactions = load_data(conn, args.limit)
-        print("Computing metrics")
-        transactions = await compute_metrics(transactions, rpc, args.debug, exchange_addresses)
-        print(f"outputting data to {args.output_path}")
-        output_data(transactions, args.output_path)
+        # Store rbf and mempool data in memory
+        rbf_data = load_rbf(conn)
+        print(f"Loaded {len(rbf_data)} rbf data")
+        mempool_data = load_mempool(conn)
+        print(f"Loaded {len(mempool_data)} mempool data")
+        for transactions in load_transactions(conn, args.limit):
+            print(f"Processing {len(transactions)} transactions")
+            merge_datasets(transactions, rbf_data, mempool_data)
+            print(f"Merged {len(transactions)} transactions")
+            transactions = await compute_metrics(transactions, rpc, args.debug, exchange_addresses)
+            output_data(transactions, args.output_path)
+            print(f"Outputted {len(transactions)} transactions")
+            print(f"head transactions: {transactions.head()}")
+
     except Exception as e:
         print(f"Error: {e}")
     finally:
