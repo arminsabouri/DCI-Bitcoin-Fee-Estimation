@@ -147,9 +147,9 @@ async def compute_metrics(transactions, rpc: BitcoinRPC, debug: bool, exchange_a
     # allow only 8 concurrent RPCs requests
     sem = asyncio.Semaphore(8)
 
-    # Return type (min respend time, sender is a known exchange, sending to known exchange address)
+    # Return type (min respend time, conf blockhash)
     # TODO: disabled is from and too exchange until we have a better source of exchange addresses
-    async def get_min_respend_time(txid: str) -> (int):
+    async def get_min_respend_time(txid: str) -> (int, str):
         async with sem:
             try:
                 print(f"Computing min_respend_time for txid {txid}")
@@ -159,7 +159,8 @@ async def compute_metrics(transactions, rpc: BitcoinRPC, debug: bool, exchange_a
                 ver_tx = await rpc.acall('getrawtransaction', [txid, 2])
                 if 'blockhash' not in ver_tx:
                     print(f"No blockhash found for txid {txid}")
-                    return -1, exchange_is_sender, exchange_is_receiver
+                    return -1, ''
+                conf_block_hash = ver_tx['blockhash']
                 conf_height = await get_block_height(ver_tx['blockhash'], rpc)
                 if debug:
                     print(f"Block height: {conf_height}")
@@ -186,16 +187,16 @@ async def compute_metrics(transactions, rpc: BitcoinRPC, debug: bool, exchange_a
 
                 if len(confs) == 0:
                     print(f"No valid prevout heights found for txid {txid}")
-                    return -1, exchange_is_sender, exchange_is_receiver
+                    return -1, conf_block_hash
 
                 if debug:
                     print(
                         f"exchange_is_sender: {exchange_is_sender}, exchange_is_receiver: {exchange_is_receiver}")
 
-                return min(confs, default=0), exchange_is_sender, exchange_is_receiver
+                return min(confs, default=0), conf_block_hash
             except Exception as e:
                 print(f"Error fetching transaction {txid}: {e}")
-                return -1, False, False
+                return -1, ''
 
     print("Computing weight and size")
     transactions[['weight', 'size', 'output_amounts', 'total_output_amount', 'output_weights']] = transactions['tx_data'].apply(
@@ -212,6 +213,7 @@ async def compute_metrics(transactions, rpc: BitcoinRPC, debug: bool, exchange_a
     )
 
     transactions['min_respend_time'] = [x[0] for x in min_respend_times]
+    transactions['conf_block_hash'] = [x[1] for x in min_respend_times]
     # TODO: disabled is from and too exchange until we have a better source of exchange addresses
     # transactions['exchange_is_sender'] = [x[1] for x in min_respend_times]
     # transactions['exchange_is_receiver'] = [x[2] for x in min_respend_times]
