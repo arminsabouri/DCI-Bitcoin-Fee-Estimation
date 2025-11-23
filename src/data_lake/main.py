@@ -118,13 +118,6 @@ def remove_outliers_iqr(df, column):
     return df[(df[column] >= lower) & (df[column] <= upper)]
 
 
-def get_tx_weight(tx_hex: str) -> int:
-    tx_bytes = bytes.fromhex(tx_hex)
-    stream = BytesIO(tx_bytes)
-    tx = CTransaction.stream_deserialize(stream)
-    return tx.calc_weight()
-
-
 block_hash_to_height = {}
 
 
