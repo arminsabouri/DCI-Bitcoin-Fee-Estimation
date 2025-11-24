@@ -328,7 +328,9 @@ def init_db(db_path):
             waittime INTEGER,
             weight INTEGER,
             size INTEGER,
-            total_output_amount INTEGER
+            total_output_amount INTEGER,
+            mempool_size INTEGER,
+            mempool_tx_count INTEGER
         );
     """)
     cur.execute(
