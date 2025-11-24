@@ -262,6 +262,7 @@ def output_data(transactions, conn):
     if "seen_in_mempool" in transactions.columns:
         transactions["seen_in_mempool"] = transactions["seen_in_mempool"].astype(
             int)
+    # TODO: it would be great to skip rows that violate the UNIQUE constraint
     transactions.to_sql('mempool_transactions', conn,
                         if_exists='append', index=False)
 
@@ -318,6 +319,7 @@ def init_db(db_path):
             mined_at DATETIME,
             pruned_at DATETIME,
 
+            rbf_fee_total INTEGER,
             min_respend_blocks INTEGER,
             absolute_fee INTEGER,
             fee_rate REAL,
