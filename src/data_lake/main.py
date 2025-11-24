@@ -368,7 +368,7 @@ async def main():
         print(f"Loaded {len(mempool_data)} mempool data")
         for transactions in load_transactions(conn, args.limit):
             print(f"Processing {len(transactions)} transactions")
-            merge_datasets(transactions, rbf_data, mempool_data)
+            transactions = merge_datasets(transactions, rbf_data, mempool_data)
             print(f"Merged {len(transactions)} transactions")
             transactions = await compute_metrics(transactions, rpc, args.debug, exchange_addresses)
             output_data(transactions, db)
