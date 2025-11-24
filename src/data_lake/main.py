@@ -144,6 +144,14 @@ async def compute_metrics(transactions, rpc: BitcoinRPC, debug: bool, exchange_a
         return tx
 
     def get_tx_stats(tx_hex: str) -> (int, int, [int], int, [int]):
+        """
+        Returns:
+            weight: int
+            size: int
+            output_amounts: list[int]
+            total_output_amount: int
+            output_weights: list[int]
+        """
         tx_bytes = bytes.fromhex(tx_hex)
         tx = ser_tx(tx_hex)
         output_amounts = [vout.nValue for vout in tx.vout]
@@ -165,10 +173,10 @@ async def compute_metrics(transactions, rpc: BitcoinRPC, debug: bool, exchange_a
 
     # Return type (min respend time, conf blockhash)
     # TODO: disabled is from and too exchange until we have a better source of exchange addresses
-    async def get_min_respend_time(txid: str) -> (int, str):
+    async def get_min_respend_blocks(txid: str) -> (int, str):
         async with sem:
             try:
-                print(f"Computing min_respend_time for txid {txid}")
+                print(f"Computing min_respend_blocks for txid {txid}")
                 confs = []
                 exchange_is_sender = False
                 exchange_is_receiver = False
@@ -224,30 +232,38 @@ async def compute_metrics(transactions, rpc: BitcoinRPC, debug: bool, exchange_a
     transactions['output_weights'] = transactions['output_weights'].apply(
         lambda x: json.dumps(x))
 
-    print("Computing min_respend_time")
+    # Convert to string because hdf5 will treat this as a variable length column
+    transactions['output_amounts'] = transactions['output_amounts'].astype(
+        'string')
+    transactions['output_weights'] = transactions['output_weights'].astype(
+        'string')
+
+    print("Computing min_respend_blocks")
     # Compute min_respend_time for each transaction asynchronously
-    min_respend_times = await asyncio.gather(
-        *[get_min_respend_time(txid) for txid in transactions['tx_id']]
+    min_respend_blocks = await asyncio.gather(
+        *[get_min_respend_blocks(txid) for txid in transactions['tx_id']]
     )
 
-    transactions['min_respend_time'] = [x[0] for x in min_respend_times]
-    transactions['conf_block_hash'] = [x[1] for x in min_respend_times]
+    transactions['min_respend_blocks'] = [x[0] for x in min_respend_blocks]
+    transactions['conf_block_hash'] = [x[1] for x in min_respend_blocks]
     # TODO: disabled is from and too exchange until we have a better source of exchange addresses
     # transactions['exchange_is_sender'] = [x[1] for x in min_respend_times]
     # transactions['exchange_is_receiver'] = [x[2] for x in min_respend_times]
-    transactions = transactions[transactions['min_respend_time'] != -1]
+    transactions = transactions[transactions['min_respend_blocks'] != -1]
 
     return transactions
 
 
-def output_data(transactions, output_path):
-    transactions.to_hdf(
-        output_path,
-        key="mempool_transactions",
-        mode="a",
-        format="table",
-        append=True
-    )
+def output_data(transactions, conn):
+    for col in ["found_at", "mined_at", "pruned_at"]:
+        if col in transactions.columns:
+            # Convert unix timestamp to human-readable datetime string
+            transactions[col] = pd.to_datetime(transactions[col], unit='s', errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S')
+    if "seen_in_mempool" in transactions.columns:
+        transactions["seen_in_mempool"] = transactions["seen_in_mempool"].astype(
+            int)
+    transactions.to_sql('mempool_transactions', conn,
+                        if_exists='append', index=False)
 
 
 def load_exchange_addresses():
@@ -282,6 +298,44 @@ def load_exchange_addresses():
     return exchange_addresses
 
 
+def init_db(db_path):
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS mempool_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tx_id TEXT UNIQUE,
+            inputs_hash TEXT UNIQUE,
+            child_txid TEXT,
+
+            tx_data TEXT,
+            output_amounts TEXT,
+            output_weights TEXT,
+            conf_block_hash TEXT,
+
+            found_at DATETIME,
+            mined_at DATETIME,
+            pruned_at DATETIME,
+
+            min_respend_blocks INTEGER,
+            absolute_fee INTEGER,
+            fee_rate REAL,
+            version INTEGER,
+            seen_in_mempool INTEGER,
+            waittime INTEGER,
+            weight INTEGER,
+            size INTEGER,
+            total_output_amount INTEGER
+        );
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mined_at ON mempool_transactions(mined_at);")
+
+    conn.commit()
+    return conn
+
+
 async def main():
     print("Starting data lake")
     p = argparse.ArgumentParser()
@@ -290,7 +344,7 @@ async def main():
     p.add_argument('--rpc-password', required=True)
     p.add_argument('--rpc-host', required=True)
     p.add_argument('--rpc-port', required=True)
-    p.add_argument('--output-path', required=False, default="data-lake.h5")
+    p.add_argument('--output-db', required=False, default="data-lake.db")
     p.add_argument('--limit', required=False, default=10_000)
     p.add_argument('--debug', required=False, default=False)
 
@@ -300,6 +354,8 @@ async def main():
     rpc = await connect_to_rpc(args.rpc_user, args.rpc_password,
                                args.rpc_host, args.rpc_port)
     exchange_addresses = load_exchange_addresses()
+
+    db = init_db(args.output_db)
 
     try:
         print("Loading data")
@@ -313,9 +369,8 @@ async def main():
             merge_datasets(transactions, rbf_data, mempool_data)
             print(f"Merged {len(transactions)} transactions")
             transactions = await compute_metrics(transactions, rpc, args.debug, exchange_addresses)
-            output_data(transactions, args.output_path)
+            output_data(transactions, db)
             print(f"Outputted {len(transactions)} transactions")
-            print(f"head transactions: {transactions.head()}")
 
     except Exception as e:
         print(f"Error: {e}")
