@@ -100,7 +100,7 @@ def load_transactions(conn, limit: int):
         if transactions.empty:
             break
 
-        last_rowid = transactions['rowid'].max()
+        last_rowid = int(transactions['rowid'].max())
         print(f"last_rowid: {last_rowid}")
 
         # Sort here to avoid pagination headaches in sql
