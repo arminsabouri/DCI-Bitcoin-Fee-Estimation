@@ -81,19 +81,21 @@ def load_transactions(conn, limit: int):
     while True:
         query = """
             SELECT
-                transactions.*,
-                (transactions.mined_at - transactions.found_at) AS waittime,
-                parent.tx_id as parent_txid,
-                transactions.rowid
-            FROM transactions
-            LEFT JOIN transactions AS parent ON transactions.tx_id = parent.child_txid
-            WHERE
-                transactions.mined_at IS NOT NULL
-                AND transactions.found_at IS NOT NULL
-                AND transactions.pruned_at IS NULL
-                AND transactions.rowid > ?
-            ORDER BY transactions.rowid ASC
-            LIMIT ?
+                filtered.*,
+                (filtered.mined_at - filtered.found_at) AS waittime,
+                parent.tx_id as parent_txid
+            FROM (
+                SELECT transactions.*, rowid
+                FROM transactions
+                WHERE
+                    mined_at IS NOT NULL
+                    AND found_at IS NOT NULL
+                    AND pruned_at IS NULL
+                    AND rowid > ?
+                ORDER BY rowid ASC
+                LIMIT ?
+            ) AS filtered
+            LEFT JOIN transactions AS parent ON filtered.tx_id = parent.child_txid
         """
         transactions = pd.read_sql_query(
             query, conn, params=(last_rowid, limit))
@@ -102,6 +104,7 @@ def load_transactions(conn, limit: int):
         if transactions.empty:
             break
 
+        print(f"transactions: {transactions.columns}")
         last_rowid = int(transactions['rowid'].max())
         print(f"last_rowid: {last_rowid}")
 
