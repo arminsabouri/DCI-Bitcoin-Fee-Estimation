@@ -61,9 +61,29 @@ def load_mempool(conn):
     return mempool_data
 
 
-def merge_datasets(transactions, rbf_data, mempool_data):
+def load_parent_mapping(conn):
+    """
+    Load parent-child relationships from source database.
+    Returns a DataFrame mapping child_txid to parent_txid (parent's tx_id).
+    If transaction A has child_txid = B, then B is a CPFP child and A is its parent.
+    """
+    parent_mapping = pd.read_sql_query("""
+        SELECT
+            child_txid,
+            tx_id as parent_txid
+        FROM transactions
+        WHERE child_txid IS NOT NULL
+    """, conn)
+    return parent_mapping
+
+
+def merge_datasets(transactions, rbf_data, mempool_data, parent_mapping):
     # merge the rbf data into the transactions dataframe
     transactions = transactions.merge(rbf_data, on='inputs_hash', how='left')
+
+    # merge parent_txid mapping (reverse lookup: if A has child_txid = B, then B's parent_txid = A)
+    transactions = transactions.merge(
+        parent_mapping[['child_txid', 'parent_txid']], left_on='tx_id', right_on='child_txid', how='left')
 
     # add the hour column to the transactions dataframe
     transactions['hour'] = pd.to_datetime(
@@ -309,6 +329,7 @@ def init_db(db_path):
             tx_id TEXT UNIQUE,
             inputs_hash TEXT UNIQUE,
             child_txid TEXT,
+            parent_txid TEXT,
 
             tx_data TEXT,
             output_amounts TEXT,
@@ -368,9 +389,11 @@ async def main():
         print(f"Loaded {len(rbf_data)} rbf data")
         mempool_data = load_mempool(conn)
         print(f"Loaded {len(mempool_data)} mempool data")
+        parent_mapping = load_parent_mapping(conn)
+        print(f"Loaded {len(parent_mapping)} parent-child relationships")
         for transactions in load_transactions(conn, args.limit):
             print(f"Processing {len(transactions)} transactions")
-            transactions = merge_datasets(transactions, rbf_data, mempool_data)
+            transactions = merge_datasets(transactions, rbf_data, mempool_data, parent_mapping)
             print(f"Merged {len(transactions)} transactions")
             transactions = await compute_metrics(transactions, rpc, args.debug, exchange_addresses)
             output_data(transactions, db)
