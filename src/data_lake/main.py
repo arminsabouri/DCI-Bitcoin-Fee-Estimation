@@ -104,12 +104,13 @@ def load_transactions(conn, limit: int):
         if transactions.empty:
             break
 
-        print(f"transactions: {transactions.columns}")
         last_rowid = int(transactions['rowid'].max())
         print(f"last_rowid: {last_rowid}")
 
         # Sort here to avoid pagination headaches in sql
         transactions = transactions.sort_values(["found_at"], ascending=False)
+        transactions = transactions.drop('rowid', axis=1)
+        print(f"transactions: {transactions.columns}")
 
         yield transactions
 
