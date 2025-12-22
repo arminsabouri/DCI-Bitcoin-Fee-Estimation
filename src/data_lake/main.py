@@ -83,7 +83,10 @@ def load_transactions(conn, limit: int):
             SELECT
                 filtered.*,
                 (filtered.mined_at - filtered.found_at) AS waittime,
-                parent.tx_id as parent_txid
+                (SELECT parent.tx_id 
+                 FROM transactions AS parent 
+                 WHERE parent.child_txid = filtered.tx_id 
+                 LIMIT 1) as parent_txid
             FROM (
                 SELECT transactions.*, rowid
                 FROM transactions
@@ -95,7 +98,6 @@ def load_transactions(conn, limit: int):
                 ORDER BY rowid ASC
                 LIMIT ?
             ) AS filtered
-            LEFT JOIN transactions AS parent ON filtered.tx_id = parent.child_txid
         """
         transactions = pd.read_sql_query(
             query, conn, params=(last_rowid, limit))
